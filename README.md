@@ -7,6 +7,8 @@ A lightweight DVR service built with Node.js + FFmpeg for:
 - MP4 archive export;
 - automatic retention cleanup using `retentionDays`.
 
+Repository: `https://github.com/rosteleset/Simple-DVR.git`
+
 ## What the service does
 
 - Starts one `ffmpeg` process per camera from `config.json`.
@@ -67,8 +69,6 @@ If you run this as a service, verify:
 
 - `WorkingDirectory` points to the real project directory.
 - `ExecStart` points to the real `server.js` path.
-
-`status=200/CHDIR` means the `WorkingDirectory` is invalid.
 
 ## License
 

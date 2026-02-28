@@ -7,6 +7,8 @@
 - выгрузки архива в MP4;
 - автоматической очистки старых записей по `retentionDays`.
 
+Репозиторий: `https://github.com/rosteleset/Simple-DVR.git`
+
 ## Что делает сервис
 
 - Запускает по одному `ffmpeg` процессу на каждую камеру из `config.json`.
@@ -67,8 +69,6 @@ node server.js
 
 - `WorkingDirectory` указывает на реальную директорию проекта.
 - `ExecStart` указывает на реальный путь к `server.js`.
-
-`status=200/CHDIR` означает неверный `WorkingDirectory`.
 
 ## Лицензия
 

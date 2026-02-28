@@ -19,7 +19,7 @@ sudo apt install -y nodejs npm ffmpeg nginx
 
 ```bash
 cd /opt
-sudo git clone <YOUR_REPO_URL> simple-dvr
+sudo git clone https://github.com/rosteleset/Simple-DVR.git simple-dvr
 cd simple-dvr
 npm init -y
 npm install express
