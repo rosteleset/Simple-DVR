@@ -1,0 +1,19 @@
+{
+  "segmentDuration": 4,
+  "liveWindow": 6,
+  "cleanupIntervalMinutes": 5,
+  "cameras": [
+    {
+      "name": "cam1",
+      "rtsp": "rtsp://login:password@camera-host/stream",
+      "retentionDays": 1,
+      "disableAudio": false
+    },
+    {
+      "name": "cam2",
+      "rtsp": "rtsp://login:password@camera-host/stream2",
+      "retentionDays": 3,
+      "disableAudio": true
+    }
+  ]
+}
