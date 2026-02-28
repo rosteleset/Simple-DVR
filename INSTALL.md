@@ -1,6 +1,6 @@
 # Simple DVR Installation
 
-## 1. Требования
+## 1. Requirements
 
 - Ubuntu/Debian Linux
 - Node.js 20+
@@ -8,14 +8,14 @@
 - `nginx`
 - `systemd`
 
-Установка пакетов:
+Install required packages:
 
 ```bash
 sudo apt update
 sudo apt install -y nodejs npm ffmpeg nginx
 ```
 
-## 2. Подготовка проекта
+## 2. Project setup
 
 ```bash
 cd /opt
@@ -25,15 +25,15 @@ npm init -y
 npm install express
 ```
 
-## 3. Настройка `config.json`
+## 3. Configure `config.json`
 
-Скопируйте пример и отредактируйте локальный `config.json`:
+Copy the example and edit your local `config.json`:
 
 ```bash
 cp config.example.json config.json
 ```
 
-Пример содержимого:
+Example config:
 
 ```json
 {
@@ -50,9 +50,9 @@ cp config.example.json config.json
 }
 ```
 
-## 4. Папка архива
+## 4. DVR storage directory
 
-По коду архив пишется в `/var/dvr`.
+By default, the service stores recordings in `/var/dvr`.
 
 ```bash
 sudo mkdir -p /var/dvr
@@ -60,25 +60,25 @@ sudo chown -R www-data:www-data /var/dvr
 sudo chmod -R 755 /var/dvr
 ```
 
-Если сервис будет работать от другого пользователя, замените `www-data` на него.
+If you run the service as another user, replace `www-data` accordingly.
 
-## 5. Пробный запуск
+## 5. Test run
 
 ```bash
 cd /opt/simple-dvr
 node server.js
 ```
 
-Проверка:
+Check:
 
-- API должен слушать `127.0.0.1:3000`
-- HLS/файлы через nginx: `http://<SERVER_IP>:8080/`
+- API listens on `127.0.0.1:3000`
+- HLS/files are available via nginx at `http://<SERVER_IP>:8080/`
 
-Остановить: `Ctrl+C`.
+Stop with `Ctrl+C`.
 
 ## 6. Nginx
 
-Скопируйте include в nginx:
+Copy the provided nginx config include:
 
 ```bash
 sudo cp /opt/simple-dvr/nginx_server.include /etc/nginx/sites-available/simple-dvr.conf
@@ -87,14 +87,14 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
-По умолчанию в проекте используются:
+Default ports in this project:
 
 - HTTP: `8080`
-- HTTPS: `8443` (нужны валидные пути `ssl_certificate` и `ssl_certificate_key`)
+- HTTPS: `8443` (requires valid `ssl_certificate` and `ssl_certificate_key` paths)
 
-## 7. Systemd сервис
+## 7. Systemd service
 
-Создайте файл `/etc/systemd/system/simple-dvr.service`:
+Create `/etc/systemd/system/simple-dvr.service`:
 
 ```ini
 [Unit]
@@ -115,7 +115,7 @@ Environment=NODE_ENV=production
 WantedBy=multi-user.target
 ```
 
-Запуск:
+Start and enable:
 
 ```bash
 sudo systemctl daemon-reload
@@ -123,19 +123,19 @@ sudo systemctl enable --now simple-dvr
 sudo systemctl status simple-dvr
 ```
 
-Логи:
+Logs:
 
 ```bash
 journalctl -u simple-dvr -f
 ```
 
-## 8. Методы Simple DVR (API)
+## 8. Simple DVR API methods
 
-Все методы ниже работают через nginx на порту `8080` (или `8443` для SSL).
+All endpoints below are served through nginx on port `8080` (or `8443` for SSL).
 
 ### 8.1 Live HLS playlist
 
-`GET` (алиасы одного и того же live-плейлиста):
+`GET` (aliases for the same live playlist):
 
 - `/:camera/live.m3u8`
 - `/:camera/index.m3u8`
@@ -144,105 +144,105 @@ journalctl -u simple-dvr -f
 - `/:camera/index.fmp4.m3u8`
 - `/:camera/video.fmp4.m3u8`
 
-Пример:
+Example:
 
 ```text
 http://<SERVER_IP>:8080/cam1/live.m3u8
 ```
 
-### 8.2 DVR HLS playlist (архив)
+### 8.2 DVR HLS playlist (archive)
 
-`GET` в формате query-параметров:
+`GET` with query parameters:
 
 - `/:camera/dvr.m3u8?start=<ISO_DATE>&end=<ISO_DATE>`
 
-Пример:
+Example:
 
 ```text
 http://<SERVER_IP>:8080/cam1/dvr.m3u8?start=2026-02-28T10:00:00Z&end=2026-02-28T10:10:00Z
 ```
 
-`GET` в формате unix timestamp:
+`GET` with unix timestamp format:
 
 - `/:camera/index-:timestamp-:duration.fmp4.m3u8`
 - `/:camera/index-:timestamp-:duration.m3u8`
 
-где:
+Where:
 
-- `timestamp` — начало в Unix-time (секунды)
-- `duration` — длительность (секунды)
+- `timestamp` is start time in Unix seconds
+- `duration` is duration in seconds
 
-Пример:
+Example:
 
 ```text
 http://<SERVER_IP>:8080/cam1/index-1740736800-600.fmp4.m3u8
 ```
 
-### 8.3 Архив в MP4
+### 8.3 MP4 archive export
 
 `GET`:
 
 - `/:camera/archive-:from-:duration.mp4`
 
-где:
+Where:
 
-- `from` — начало в Unix-time (секунды)
-- `duration` — длительность (секунды)
+- `from` is start time in Unix seconds
+- `duration` is duration in seconds
 
-Пример:
+Example:
 
 ```text
 http://<SERVER_IP>:8080/cam1/archive-1740736800-600.mp4
 ```
 
-### 8.4 Статус записей (доступные диапазоны)
+### 8.4 Recording ranges status
 
 `GET`:
 
 - `/:camera/recording_status.json`
 
-Пример:
+Example:
 
 ```text
 http://<SERVER_IP>:8080/cam1/recording_status.json
 ```
 
-Ответ: массив диапазонов записи (`from`, `duration`) для камеры.
+Response contains available recording ranges (`from`, `duration`) for the camera.
 
-### 8.5 Превью mp4-thumbnail по времени
+### 8.5 Time-based preview clip
 
 `GET`:
 
 - `/:camera/:yyyy/:mm/:dd/:HH/:MM/:SS-preview.mp4`
 
-Пример:
+Example:
 
 ```text
 http://<SERVER_IP>:8080/cam1/2026/02/28/10/15/00-preview.mp4
 ```
 
-### 8.6 Прямой доступ к сегментам и файлам DVR
+### 8.6 Direct DVR file access
 
-Через nginx location `/dvr/` отдается содержимое `/var/dvr/`:
+Nginx serves `/var/dvr/` under `/dvr/`:
 
 ```text
 http://<SERVER_IP>:8080/dvr/<camera>/<YYYY-MM-DD>/<HH>/<segment>.m4s
 ```
 
-## 9. Проверка после установки
+## 9. Post-install checks
 
-Проверьте:
+Verify:
 
-1. Папки камер создаются в `/var/dvr/<camera_name>/`.
-2. Внутри появляются структуры `YYYY-MM-DD/HH/*.m4s`.
-3. Live-плейлист открывается по URL `http://<SERVER_IP>:8080/<camera>/live.m3u8`.
-4. Cleanup удаляет устаревшие часовые/дневные папки по `retentionDays`.
+1. Camera folders are created in `/var/dvr/<camera_name>/`.
+2. The structure `YYYY-MM-DD/HH/*.m4s` appears.
+3. Live playlist is available at `http://<SERVER_IP>:8080/<camera>/live.m3u8`.
+4. Cleanup removes old hour/day folders according to `retentionDays`.
 
-## 10. Важно про изменение `config.json`
+## 10. Important note about `config.json` changes
 
-- Очистка (cleanup worker) подхватывает `cameras/retentionDays` из `config.json` на следующем цикле cleanup.
-- Остальная часть приложения (запуск ffmpeg, интервалы) читает конфиг при старте процесса.
-  Для применения этих параметров перезапустите сервис:
+- Cleanup worker reads updated `cameras/retentionDays` from `config.json` on the next cleanup cycle.
+- The rest of the app (`ffmpeg` startup, intervals, base settings) is read at process start.
+  Restart the service to apply those changes:
 
 ```bash
 sudo systemctl restart simple-dvr

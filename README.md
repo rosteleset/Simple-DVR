@@ -1,73 +1,75 @@
 # Simple DVR
 
-Simple DVR на Node.js + FFmpeg для:
+A lightweight DVR service built with Node.js + FFmpeg for:
 
-- live HLS стриминга RTSP-камер;
-- просмотра архива по времени;
-- выгрузки архива в MP4;
-- автоочистки старых записей по `retentionDays`.
+- live HLS streaming from RTSP cameras;
+- archive playback by time range;
+- MP4 archive export;
+- automatic retention cleanup using `retentionDays`.
 
-## Что делает сервис
+## What the service does
 
-- Запускает `ffmpeg` процесс для каждой камеры из `config.json`.
-- Пишет сегменты в `/var/dvr/<camera>/YYYY-MM-DD/HH/*.m4s`.
-- Отдает live и archive плейлисты через HTTP.
-- Генерирует минутные preview-ролики.
-- Чистит старые данные в отдельном worker-потоке (`cleanup-worker.js`).
+- Starts one `ffmpeg` process per camera from `config.json`.
+- Stores segments in `/var/dvr/<camera>/YYYY-MM-DD/HH/*.m4s`.
+- Serves live and archive playlists over HTTP.
+- Generates minute preview clips.
+- Runs cleanup in a dedicated worker thread (`cleanup-worker.js`).
 
-## Быстрый старт
+## Quick start
 
-1. Скопируйте пример конфига:
+1. Copy the config template:
 
 ```bash
 cp config.example.json config.json
 ```
 
-2. Заполните RTSP URL и параметры камер в `config.json`.
+2. Update RTSP URLs and camera settings in `config.json`.
 
-3. Установите зависимости:
+3. Install dependencies:
 
 ```bash
 npm init -y
 npm install express
 ```
 
-4. Запустите:
+4. Run:
 
 ```bash
 node server.js
 ```
 
-## Основные эндпоинты
+## Main endpoints
 
-- `GET /:camera/live.m3u8` (и алиасы `index.m3u8`, `video.m3u8`, `*.fmp4.m3u8`)
+- `GET /:camera/live.m3u8` (aliases: `index.m3u8`, `video.m3u8`, `*.fmp4.m3u8`)
 - `GET /:camera/dvr.m3u8?start=<ISO>&end=<ISO>`
 - `GET /:camera/index-:timestamp-:duration.fmp4.m3u8`
 - `GET /:camera/archive-:from-:duration.mp4`
 - `GET /:camera/recording_status.json`
 - `GET /:camera/:yyyy/:mm/:dd/:HH/:MM/:SS-preview.mp4`
-- `GET /dvr/...` прямой доступ к файлам DVR через nginx alias
+- `GET /dvr/...` direct DVR file access via nginx alias
 
-Подробное описание API и развертывания: [INSTALL.md](./INSTALL.md).
+For full API and deployment details, see [INSTALL.md](./INSTALL.md).
 
-## Конфиг
+## Configuration
 
-См. [config.example.json](./config.example.json).
+See [config.example.json](./config.example.json).
 
-Ключевые параметры:
+Key parameters:
 
-- `segmentDuration`: длительность HLS сегмента (сек)
-- `liveWindow`: размер live-окна в сегментах
-- `cleanupIntervalMinutes`: интервал запуска очистки
-- `cameras[]`: список камер (`name`, `rtsp`, `retentionDays`, `disableAudio`)
+- `segmentDuration`: HLS segment duration (seconds)
+- `liveWindow`: live window size (segments)
+- `cleanupIntervalMinutes`: cleanup interval
+- `cameras[]`: camera list (`name`, `rtsp`, `retentionDays`, `disableAudio`)
 
-## Systemd
+## Systemd notes
 
-Если запускаете как сервис, внимательно проверьте:
+If you run this as a service, verify:
 
-- `WorkingDirectory` должен указывать на реальную папку проекта.
-- `ExecStart` должен указывать на реальный путь к `server.js`.
+- `WorkingDirectory` points to the real project directory.
+- `ExecStart` points to the real `server.js` path.
 
-## Лицензия
+`status=200/CHDIR` means the `WorkingDirectory` is invalid.
 
-Проект лицензирован по [LICENSE](./LICENSE).
+## License
+
+Licensed under [LICENSE](./LICENSE).
