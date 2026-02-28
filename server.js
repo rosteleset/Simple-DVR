@@ -325,8 +325,6 @@ function generateMinutePreview(cameraName) {
 
     const initPath = path.join(cameraPath, 'init.mp4');
 
-    console.log(`Generating preview for ${cameraName}: ${previewName}`);
-
     const ff = spawn('ffmpeg', [
         '-nostdin',
         '-threads', '1',

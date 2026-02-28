@@ -27,7 +27,13 @@ npm install express
 
 ## 3. Настройка `config.json`
 
-Отредактируйте файл `config.json`:
+Скопируйте пример и отредактируйте локальный `config.json`:
+
+```bash
+cp config.example.json config.json
+```
+
+Пример содержимого:
 
 ```json
 {
