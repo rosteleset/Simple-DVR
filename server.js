@@ -4,44 +4,126 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { Worker } = require('worker_threads');
 
-const config = JSON.parse(fs.readFileSync('./config.json'));
-
+const CONFIG_PATH = path.join(__dirname, 'config.json');
 const DVR_ROOT = '/var/dvr';
-const SEGMENT_DURATION = config.segmentDuration;
-const LIVE_SEGMENTS = config.liveWindow;
-const CLEAN_INTERVAL = config.cleanupIntervalMinutes * 60 * 1000;
+const FFMPEG_RESTART_DELAY_MS = 5000;
+const CAMERA_STOP_TIMEOUT_MS = 3000;
 
 const PREVIEW_DURATION = 0.2; // seconds
 const PREVIEW_CHECK_INTERVAL = 15000; // check every 15 seconds
 
 const app = express();
-const processes = {};   // ffmpeg processes per camera
+
+let config = loadConfigFromDisk();
+let segmentDuration = config.segmentDuration;
+let liveSegments = config.liveWindow;
+let cleanupIntervalMs = config.cleanupIntervalMinutes * 60 * 1000;
+
+const cameraRuntimes = new Map(); // ffmpeg runtime per camera
 let cleanupWorker = null;
 let cleanupInProgress = false;
+let cleanupTimer = null;
 let isShuttingDown = false;
+let reloadInProgress = false;
+let reloadQueued = false;
+
+// ----------------------------------------
+// Config
+// ----------------------------------------
+function normalizeConfig(rawConfig) {
+    if (!rawConfig || typeof rawConfig !== 'object') {
+        throw new Error('Config must be an object');
+    }
+
+    const nextSegmentDuration = Number(rawConfig.segmentDuration);
+    const nextLiveWindow = Math.floor(Number(rawConfig.liveWindow));
+    const nextCleanupIntervalMinutes = Number(rawConfig.cleanupIntervalMinutes);
+
+    if (!Number.isFinite(nextSegmentDuration) || nextSegmentDuration <= 0) {
+        throw new Error('segmentDuration must be a positive number');
+    }
+
+    if (!Number.isFinite(nextLiveWindow) || nextLiveWindow <= 0) {
+        throw new Error('liveWindow must be a positive integer');
+    }
+
+    if (!Number.isFinite(nextCleanupIntervalMinutes) || nextCleanupIntervalMinutes <= 0) {
+        throw new Error('cleanupIntervalMinutes must be a positive number');
+    }
+
+    if (!Array.isArray(rawConfig.cameras)) {
+        throw new Error('cameras must be an array');
+    }
+
+    const seenNames = new Set();
+    const cameras = rawConfig.cameras.map((camera, index) => {
+        if (!camera || typeof camera !== 'object') {
+            throw new Error(`cameras[${index}] must be an object`);
+        }
+
+        const name = typeof camera.name === 'string' ? camera.name.trim() : '';
+        const rtsp = typeof camera.rtsp === 'string' ? camera.rtsp.trim() : '';
+
+        if (!name) {
+            throw new Error(`cameras[${index}].name is required`);
+        }
+
+        if (seenNames.has(name)) {
+            throw new Error(`duplicate camera name: ${name}`);
+        }
+        seenNames.add(name);
+
+        if (!rtsp) {
+            throw new Error(`cameras[${index}].rtsp is required`);
+        }
+
+        return {
+            ...camera,
+            name,
+            rtsp,
+            disableAudio: camera.disableAudio === true
+        };
+    });
+
+    return {
+        ...rawConfig,
+        segmentDuration: nextSegmentDuration,
+        liveWindow: nextLiveWindow,
+        cleanupIntervalMinutes: nextCleanupIntervalMinutes,
+        cameras
+    };
+}
+
+function loadConfigFromDisk() {
+    const raw = fs.readFileSync(CONFIG_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    return normalizeConfig(parsed);
+}
 
 // ----------------------------------------
 // Ensure DVR directories exist
 // ----------------------------------------
-
-function ensureCameraDirs() {
+function ensureCameraDirs(cameras = config.cameras) {
     if (!fs.existsSync(DVR_ROOT)) {
-        fs.mkdirSync(DVR_ROOT);
+        fs.mkdirSync(DVR_ROOT, { recursive: true });
     }
 
-    for (const cam of config.cameras) {
+    for (const cam of cameras) {
         const dir = path.join(DVR_ROOT, cam.name);
         if (!fs.existsSync(dir)) {
-            fs.mkdirSync(dir);
+            fs.mkdirSync(dir, { recursive: true });
         }
     }
 }
 
-// ----------------------------------------
-// Start FFmpeg
-// ----------------------------------------
-function startFFmpeg(camera) {
+function cameraRequiresRestart(prevCamera, nextCamera) {
+    return (
+        prevCamera.rtsp !== nextCamera.rtsp ||
+        prevCamera.disableAudio !== nextCamera.disableAudio
+    );
+}
 
+function buildFfmpegArgs(camera) {
     const outputDir = path.join(DVR_ROOT, camera.name);
 
     const args = [
@@ -66,7 +148,7 @@ function startFFmpeg(camera) {
 
     args.push(
         '-f', 'hls',
-        '-hls_time', SEGMENT_DURATION,
+        '-hls_time', segmentDuration.toString(),
         '-hls_segment_type', 'fmp4',
         '-hls_playlist_type', 'event',
         '-strftime', '1',
@@ -75,17 +157,218 @@ function startFFmpeg(camera) {
         `${outputDir}/index.m3u8`
     );
 
-    console.log(`Starting ffmpeg for ${camera.name}`);
+    return args;
+}
+
+function registerCameraRuntime(camera) {
+    cameraRuntimes.set(camera.name, {
+        camera,
+        process: null,
+        shouldRun: true,
+        restartTimer: null
+    });
+}
+
+// ----------------------------------------
+// Start/stop FFmpeg
+// ----------------------------------------
+function startCameraProcess(cameraName) {
+    const runtime = cameraRuntimes.get(cameraName);
+    if (!runtime || !runtime.shouldRun || runtime.process) return;
+
+    const args = buildFfmpegArgs(runtime.camera);
+
+    console.log(`Starting ffmpeg for ${cameraName}`);
     console.log('Args:', args.join(' '));
 
     const ff = spawn('ffmpeg', args, { stdio: 'ignore' });
+    runtime.process = ff;
 
-    ff.on('exit', (code) => {
-        console.log(`${camera.name} ffmpeg exited (${code}), restarting...`);
-        setTimeout(() => startFFmpeg(camera), 5000);
+    ff.on('exit', (code, signal) => {
+        const current = cameraRuntimes.get(cameraName);
+        if (!current) return;
+
+        current.process = null;
+
+        if (!current.shouldRun || isShuttingDown) return;
+
+        const exitReason = code === null ? `signal ${signal}` : `code ${code}`;
+        console.log(`${cameraName} ffmpeg exited (${exitReason}), restarting...`);
+
+        if (current.restartTimer) {
+            clearTimeout(current.restartTimer);
+        }
+
+        current.restartTimer = setTimeout(() => {
+            const latest = cameraRuntimes.get(cameraName);
+            if (!latest || !latest.shouldRun || latest.process || isShuttingDown) return;
+            latest.restartTimer = null;
+            startCameraProcess(cameraName);
+        }, FFMPEG_RESTART_DELAY_MS);
     });
 
-    processes[camera.name] = ff;
+    ff.on('error', (err) => {
+        console.error(`Failed to start ffmpeg for ${cameraName}:`, err.message);
+    });
+}
+
+function waitForProcessExit(proc, timeoutMs = CAMERA_STOP_TIMEOUT_MS) {
+    return new Promise((resolve) => {
+        let done = false;
+
+        const finish = () => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            proc.removeListener('exit', finish);
+            resolve();
+        };
+
+        const timer = setTimeout(finish, timeoutMs);
+        proc.once('exit', finish);
+    });
+}
+
+async function stopCameraProcess(cameraName, { removeRuntime = false } = {}) {
+    const runtime = cameraRuntimes.get(cameraName);
+    if (!runtime) return;
+
+    runtime.shouldRun = false;
+
+    if (runtime.restartTimer) {
+        clearTimeout(runtime.restartTimer);
+        runtime.restartTimer = null;
+    }
+
+    const proc = runtime.process;
+    runtime.process = null;
+
+    if (proc && !proc.killed) {
+        proc.kill('SIGTERM');
+        await waitForProcessExit(proc);
+    }
+
+    if (removeRuntime) {
+        cameraRuntimes.delete(cameraName);
+    }
+}
+
+async function restartCameraProcess(cameraName, reason) {
+    const runtime = cameraRuntimes.get(cameraName);
+    if (!runtime) return;
+
+    console.log(`Restarting ffmpeg for ${cameraName}: ${reason}`);
+    await stopCameraProcess(cameraName);
+    runtime.shouldRun = true;
+    startCameraProcess(cameraName);
+}
+
+async function reconcileCameraProcesses(previousConfig, nextConfig) {
+    const previousNames = new Set(previousConfig.cameras.map((cam) => cam.name));
+    const nextByName = new Map(nextConfig.cameras.map((cam) => [cam.name, cam]));
+    const segmentDurationChanged = previousConfig.segmentDuration !== nextConfig.segmentDuration;
+
+    for (const cameraName of previousNames) {
+        if (nextByName.has(cameraName)) continue;
+
+        console.log(`Camera removed from config: ${cameraName}`);
+        await stopCameraProcess(cameraName, { removeRuntime: true });
+    }
+
+    for (const [cameraName, nextCamera] of nextByName.entries()) {
+        const runtime = cameraRuntimes.get(cameraName);
+
+        if (!runtime) {
+            registerCameraRuntime(nextCamera);
+            startCameraProcess(cameraName);
+            continue;
+        }
+
+        const cameraChanged = cameraRequiresRestart(runtime.camera, nextCamera);
+        runtime.camera = nextCamera;
+        runtime.shouldRun = true;
+
+        if (segmentDurationChanged || cameraChanged) {
+            const reason = segmentDurationChanged
+                ? 'segmentDuration changed'
+                : 'camera RTSP/audio settings changed';
+            await restartCameraProcess(cameraName, reason);
+            continue;
+        }
+
+        if (!runtime.process) {
+            startCameraProcess(cameraName);
+        }
+    }
+}
+
+function scheduleCleanup() {
+    if (cleanupTimer) {
+        clearInterval(cleanupTimer);
+    }
+
+    cleanupTimer = setInterval(runCleanup, cleanupIntervalMs);
+}
+
+async function applyConfig(nextConfig, trigger) {
+    const previousConfig = config;
+    const previousCleanupIntervalMs = cleanupIntervalMs;
+
+    config = nextConfig;
+    segmentDuration = nextConfig.segmentDuration;
+    liveSegments = nextConfig.liveWindow;
+    cleanupIntervalMs = nextConfig.cleanupIntervalMinutes * 60 * 1000;
+
+    ensureCameraDirs(config.cameras);
+    await reconcileCameraProcesses(previousConfig, nextConfig);
+
+    if (cleanupIntervalMs !== previousCleanupIntervalMs) {
+        scheduleCleanup();
+    }
+
+    syncCleanupConfig();
+
+    console.log(
+        `Config reloaded (${trigger}): ${config.cameras.length} camera(s), ` +
+        `segmentDuration=${segmentDuration}, liveWindow=${liveSegments}, ` +
+        `cleanupIntervalMinutes=${config.cleanupIntervalMinutes}`
+    );
+}
+
+async function reloadConfig(trigger = 'manual') {
+    if (reloadInProgress) {
+        reloadQueued = true;
+        return { ok: true, queued: true };
+    }
+
+    reloadInProgress = true;
+
+    try {
+        const nextConfig = loadConfigFromDisk();
+        await applyConfig(nextConfig, trigger);
+        return { ok: true, queued: false };
+    } catch (err) {
+        const errorMessage = err && err.message ? err.message : String(err);
+        console.error(`Failed to reload config (${trigger}):`, errorMessage);
+        return { ok: false, queued: false, error: errorMessage };
+    } finally {
+        reloadInProgress = false;
+
+        if (reloadQueued && !isShuttingDown) {
+            reloadQueued = false;
+            reloadConfig('queued-change').catch(() => {});
+        }
+    }
+}
+
+function watchConfigFile() {
+    fs.watchFile(CONFIG_PATH, { interval: 2000 }, (curr, prev) => {
+        if (curr.mtimeMs === prev.mtimeMs) return;
+        if (isShuttingDown) return;
+
+        console.log('Detected config.json change, reloading...');
+        reloadConfig('file-change').catch(() => {});
+    });
 }
 
 // ----------------------------------------
@@ -163,14 +446,6 @@ function initCleanupWorker() {
 // Get latest cameras config for cleanup worker
 // ----------------------------------------
 function getLatestCleanupCameras() {
-    try {
-        const raw = fs.readFileSync('./config.json', 'utf8');
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed.cameras)) return parsed.cameras;
-    } catch (err) {
-        console.error('Failed to read latest cleanup config:', err.message);
-    }
-
     return config.cameras;
 }
 
@@ -230,7 +505,7 @@ function buildPlaylist(camera, segments, mode, mediaSequence = 0) {
 
     let header = `#EXTM3U
 #EXT-X-VERSION:7
-#EXT-X-TARGETDURATION:${SEGMENT_DURATION}
+#EXT-X-TARGETDURATION:${segmentDuration}
 #EXT-X-MAP:URI="/dvr/${camera}/init.mp4"
 `;
 
@@ -241,7 +516,7 @@ function buildPlaylist(camera, segments, mode, mediaSequence = 0) {
     }
 
     let body = segments.map(f =>
-        `#EXTINF:${SEGMENT_DURATION.toFixed(3)},\n/dvr/${camera}/${f}`
+        `#EXTINF:${segmentDuration.toFixed(3)},\n/dvr/${camera}/${f}`
     ).join('\n');
 
     if (mode !== 'live') body += '\n#EXT-X-ENDLIST';
@@ -257,7 +532,7 @@ function buildRecordingRanges(camera) {
     const segments = getSegments(camera);
 
     if (segments.length === 0) {
-	return res.status(404).send('No segments');
+        return [];
     }
     const ranges = [];
 
@@ -279,10 +554,10 @@ function buildRecordingRanges(camera) {
 
         const gap = unix - previousTs;
 
-        if (gap > SEGMENT_DURATION * 1.5) {
+        if (gap > segmentDuration * 1.5) {
             ranges.push({
                 from: currentStart,
-                duration: previousTs - currentStart + SEGMENT_DURATION
+                duration: previousTs - currentStart + segmentDuration
             });
 
             currentStart = unix;
@@ -295,7 +570,7 @@ function buildRecordingRanges(camera) {
     if (currentStart !== null && previousTs !== null) {
         ranges.push({
             from: currentStart,
-            duration: previousTs - currentStart + SEGMENT_DURATION
+            duration: previousTs - currentStart + segmentDuration
         });
     }
 
@@ -348,17 +623,17 @@ function generateMinutePreview(cameraName) {
 // Live streaming HLS playlists
 // ----------------------------------------
 app.get([
-    '/:camera/live.m3u8', 
-    '/:camera/index.m3u8', 
+    '/:camera/live.m3u8',
+    '/:camera/index.m3u8',
     '/:camera/video.m3u8',
-    '/:camera/live.fmp4.m3u8', 
-    '/:camera/index.fmp4.m3u8', 
+    '/:camera/live.fmp4.m3u8',
+    '/:camera/index.fmp4.m3u8',
     '/:camera/video.fmp4.m3u8'], (req, res) => {
 
     const camera = req.params.camera;
     const segments = getSegments(camera);
 
-    const live = segments.slice(-LIVE_SEGMENTS);
+    const live = segments.slice(-liveSegments);
     const mediaSequence = segments.length - live.length;
 
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
@@ -371,33 +646,31 @@ app.get([
 // DVR archive HLS playlist for a given time and duration
 // ----------------------------------------
 app.get([
-    '/:camera/dvr.m3u8', 
-    '/:camera/index-:timestamp-:duration.fmp4.m3u8', 
+    '/:camera/dvr.m3u8',
+    '/:camera/index-:timestamp-:duration.fmp4.m3u8',
     '/:camera/index-:timestamp-:duration.m3u8'], (req, res) => {
 
     const camera = req.params.camera;
-    const segments = getSegments(camera);
 
-    var start = false
-    var end = false
-
+    let start = null;
+    let end = null;
 
     if (req.params.timestamp && req.params.duration) {
 
-	const unix = parseInt(req.params.timestamp);
-	const dur = parseInt(req.params.duration);
+        const unix = parseInt(req.params.timestamp, 10);
+        const dur = parseInt(req.params.duration, 10);
 
-	if (isNaN(unix) || isNaN(dur)) {
-    	    return res.status(400).send('Invalid timestamp');
-	}
+        if (isNaN(unix) || isNaN(dur)) {
+            return res.status(400).send('Invalid timestamp');
+        }
 
-	start = new Date(unix * 1000);
-	end = new Date((unix + dur) * 1000);
+        start = new Date(unix * 1000);
+        end = new Date((unix + dur) * 1000);
     } else if (!req.query.start || !req.query.end) {
         return res.status(400).send('start and end required');
     } else {
-	start = new Date(req.query.start);
-	end = new Date(req.query.end);
+        start = new Date(req.query.start);
+        end = new Date(req.query.end);
     }
 
     const selected = selectSegments(camera, start, end);
@@ -412,8 +685,8 @@ app.get([
 app.get('/:camera/archive-:from-:duration.mp4', (req, res) => {
 
     const camera = req.params.camera;
-    const from = parseInt(req.params.from);
-    const duration = parseInt(req.params.duration);
+    const from = parseInt(req.params.from, 10);
+    const duration = parseInt(req.params.duration, 10);
 
     if (isNaN(from) || isNaN(duration)) {
         return res.status(400).send('Invalid parameters');
@@ -477,19 +750,19 @@ app.get('/:camera/recording_status.json', (req, res) => {
 });
 
 // ----------------------------------------
-// Endpoint to serve preview MP4 files. 
+// Endpoint to serve preview MP4 files.
 // By default previews are generated every minute.
 // ----------------------------------------
 app.get('/:camera/:yyyy/:mm/:dd/:HH/:MM/:SS-preview.mp4', (req, res) => {
 
     const camera = req.params.camera;
 
-    const yyyy = parseInt(req.params.yyyy);
-    const mm   = parseInt(req.params.mm);
-    const dd   = parseInt(req.params.dd);
-    const HH   = parseInt(req.params.HH);
-    const MM   = parseInt(req.params.MM);
-    const SS   = parseInt(req.params.SS);
+    const yyyy = parseInt(req.params.yyyy, 10);
+    const mm = parseInt(req.params.mm, 10);
+    const dd = parseInt(req.params.dd, 10);
+    const HH = parseInt(req.params.HH, 10);
+    const MM = parseInt(req.params.MM, 10);
+    const SS = parseInt(req.params.SS, 10);
 
     // Build date as UTC
     const utcDate = new Date(Date.UTC(yyyy, mm - 1, dd, HH, MM, SS));
@@ -522,19 +795,34 @@ app.get('/:camera/:yyyy/:mm/:dd/:HH/:MM/:SS-preview.mp4', (req, res) => {
     res.sendFile(previewPath);
 });
 
+async function handleConfigReloadRequest(req, res) {
+    const result = await reloadConfig('http-endpoint');
+
+    if (!result.ok) {
+        return res.status(500).json(result);
+    }
+
+    res.json(result);
+}
+
+app.get('/admin/reload-config', handleConfigReloadRequest);
+app.post('/admin/reload-config', handleConfigReloadRequest);
+
 // ----------------------------------------
 // Boot
 // ----------------------------------------
-ensureCameraDirs();
+ensureCameraDirs(config.cameras);
 
 // Start ffmpeg for each camera
 for (const cam of config.cameras) {
-    startFFmpeg(cam);
+    registerCameraRuntime(cam);
+    startCameraProcess(cam.name);
 }
 
 // Start worker to clean up old DVR files and previews
 initCleanupWorker();
-setInterval(runCleanup, CLEAN_INTERVAL);
+scheduleCleanup();
+watchConfigFile();
 
 // Check for new previews every 15 seconds
 // while previews themselves are generated once per minute
@@ -552,8 +840,22 @@ function shutdown() {
     isShuttingDown = true;
     console.log('Shutting down DVR engine...');
 
-    for (const name in processes) {
-        const proc = processes[name];
+    fs.unwatchFile(CONFIG_PATH);
+
+    if (cleanupTimer) {
+        clearInterval(cleanupTimer);
+        cleanupTimer = null;
+    }
+
+    for (const [name, runtime] of cameraRuntimes.entries()) {
+        runtime.shouldRun = false;
+
+        if (runtime.restartTimer) {
+            clearTimeout(runtime.restartTimer);
+            runtime.restartTimer = null;
+        }
+
+        const proc = runtime.process;
         if (proc && !proc.killed) {
             console.log(`Stopping ffmpeg for ${name}`);
             proc.kill('SIGTERM');
@@ -574,6 +876,14 @@ process.on('SIGINT', shutdown);
 
 // systemd / docker stop
 process.on('SIGTERM', shutdown);
+
+// Config reload without service restart
+process.on('SIGHUP', () => {
+    if (isShuttingDown) return;
+
+    console.log('Received SIGHUP, reloading config...');
+    reloadConfig('SIGHUP').catch(() => {});
+});
 
 // Handle unexpected crashes
 process.on('uncaughtException', (err) => {
