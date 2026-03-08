@@ -11,8 +11,8 @@ const SEGMENT_DURATION = config.segmentDuration;
 const LIVE_SEGMENTS = config.liveWindow;
 const CLEAN_INTERVAL = config.cleanupIntervalMinutes * 60 * 1000;
 
-const PREVIEW_DURATION = 0.2; // секунды
-const PREVIEW_CHECK_INTERVAL = 15000; // проверять каждые 15 сек
+const PREVIEW_DURATION = 0.2; // seconds
+const PREVIEW_CHECK_INTERVAL = 15000; // check every 15 seconds
 
 const app = express();
 const processes = {};   // ffmpeg processes per camera
@@ -49,17 +49,17 @@ function startFFmpeg(camera) {
         '-i', camera.rtsp
     ];
 
-    // 👉 если в конфиге указано отключить звук
+    // If audio is disabled in config
     if (camera.disableAudio === true) {
         args.push('-an');
     }
 
-    // видео всегда копируем
+    // Always copy video
     args.push(
         '-c:v', 'copy'
     );
 
-    // если звук НЕ отключён — просто копируем
+    // If audio is not disabled, copy it as-is
     if (camera.disableAudio !== true) {
         args.push('-c:a', 'copy');
     }
@@ -212,7 +212,7 @@ function getSegments(camera) {
             if (entry.isDirectory()) {
                 walk(full);
             } else if (entry.name.endsWith('.m4s')) {
-                // сохраняем относительный путь
+                // Store relative path
                 results.push(path.relative(cameraPath, full));
             }
         }
@@ -291,7 +291,7 @@ function buildRecordingRanges(camera) {
         previousTs = unix;
     }
 
-    // закрываем последний диапазон
+    // Close the last range
     if (currentStart !== null && previousTs !== null) {
         ranges.push({
             from: currentStart,
@@ -321,7 +321,7 @@ function generateMinutePreview(cameraName) {
     const previewName = `${minuteKey}_preview.mp4`;
     const previewFull = path.join(cameraPath, path.dirname(lastSegmentRel), previewName);
 
-    if (fs.existsSync(previewFull)) return; // уже есть
+    if (fs.existsSync(previewFull)) return; // already exists
 
     const initPath = path.join(cameraPath, 'init.mp4');
 
@@ -491,10 +491,10 @@ app.get('/:camera/:yyyy/:mm/:dd/:HH/:MM/:SS-preview.mp4', (req, res) => {
     const MM   = parseInt(req.params.MM);
     const SS   = parseInt(req.params.SS);
 
-    // 👉 создаём дату как UTC
+    // Build date as UTC
     const utcDate = new Date(Date.UTC(yyyy, mm - 1, dd, HH, MM, SS));
 
-    // 👉 переводим в локальное время сервера
+    // Convert to server local time
     const localDate = new Date(utcDate.getTime());
 
     const localY = localDate.getFullYear();
@@ -527,17 +527,17 @@ app.get('/:camera/:yyyy/:mm/:dd/:HH/:MM/:SS-preview.mp4', (req, res) => {
 // ----------------------------------------
 ensureCameraDirs();
 
-// запускаем ffmpeg для каждой камеры
+// Start ffmpeg for each camera
 for (const cam of config.cameras) {
     startFFmpeg(cam);
 }
 
-// запускаем воркер для очистки старых файлов DVR и preview
+// Start worker to clean up old DVR files and previews
 initCleanupWorker();
 setInterval(runCleanup, CLEAN_INTERVAL);
 
-// запускаем проверку на создания новых превью каждые 15 секунд
-// при этом сами превью генерируются раз в минуту
+// Check for new previews every 15 seconds
+// while previews themselves are generated once per minute
 setInterval(() => {
     for (const cam of config.cameras) {
         generateMinutePreview(cam.name);
@@ -575,7 +575,7 @@ process.on('SIGINT', shutdown);
 // systemd / docker stop
 process.on('SIGTERM', shutdown);
 
-// если что-то упало
+// Handle unexpected crashes
 process.on('uncaughtException', (err) => {
     console.error('Uncaught exception:', err);
     shutdown();

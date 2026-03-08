@@ -9,52 +9,52 @@ function cleanup() {
     const now = Date.now();
     const DAY_MS = 24 * 60 * 60 * 1000;
 
-    // Проходим по каждой камере и удаляем папки с видео, которые старше retentionDays
+    // Iterate over cameras and remove video folders older than retentionDays
     for (const cam of cameras) {
-        // Базовая папка для камеры
+        // Base directory for this camera
         const baseDir = path.join(DVR_ROOT, cam.name);
-        // Вычисляем retention в миллисекундах
+        // Convert retention to milliseconds
         const retentionMs = Number(cam.retentionDays) * DAY_MS;
 
-        // Если retentionDays не задано или некорректно, пропускаем эту камеру
+        // Skip this camera if retentionDays is missing or invalid
         if (!Number.isFinite(retentionMs) || retentionMs < 0) continue;
-        // Если папки камеры нет, пропускаем
+        // Skip if the camera directory does not exist
         if (!fs.existsSync(baseDir)) continue;
 
-        // Читаем папки первого уровня (дни)
+        // Read first-level folders (days)
         const dayEntries = fs.readdirSync(baseDir, { withFileTypes: true });
 
-        // Папки первого уровня - это дни в формате YYYY-MM-DD
+        // First-level folders are days in YYYY-MM-DD format
         for (const dayEntry of dayEntries) {
-            // Проверяем, что это папка и что имя соответствует формату даты   
+            // Ensure this is a directory and its name matches the date format
             if (!dayEntry.isDirectory()) continue;
             if (!/^\d{4}-\d{2}-\d{2}$/.test(dayEntry.name)) continue;
 
-            // Путь к папке дня и вычисляем время окончания этого дня в миллисекундах
+            // Build day folder path and compute this day's end time in milliseconds
             const dayPath = path.join(baseDir, dayEntry.name);
             const dayEnd = new Date(`${dayEntry.name}T23:59:59.999`).getTime();
             
-            // Если время окончания дня определено и прошло больше, чем retention, удаляем всю папку дня
+            // If day end time is valid and older than retention, remove the whole day folder
             if (Number.isFinite(dayEnd) && (now - dayEnd) > retentionMs) {
                 fs.rmSync(dayPath, { recursive: true, force: true });
                 continue;
             }
 
-            // Если папка дня не удалена, проверяем папки часов внутри нее
+            // If the day folder was not removed, check nested hour folders
             const hourEntries = fs.readdirSync(dayPath, { withFileTypes: true });
 
-            // Папки второго уровня - это часы в формате HH
+            // Second-level folders are hours in HH format
             for (const hourEntry of hourEntries) {
-                // Проверяем, что это папка и что имя соответствует формату часа
+                // Ensure this is a directory and its name matches the hour format
                 if (!hourEntry.isDirectory()) continue;
                 if (!/^\d{2}$/.test(hourEntry.name)) continue;
 
-                // Путь к папке часа и вычисляем время окончания этого часа в миллисекундах
+                // Build hour folder path and compute this hour's end time in milliseconds
                 const hourPath = path.join(dayPath, hourEntry.name);
                 const hourEnd = new Date(
                     `${dayEntry.name}T${hourEntry.name}:59:59.999`
                 ).getTime();
-                // Если время окончания часа определено и прошло больше, чем retention, удаляем папку часа
+                // If hour end time is valid and older than retention, remove the hour folder
                 if (Number.isFinite(hourEnd) && (now - hourEnd) > retentionMs) {
                     fs.rmSync(hourPath, { recursive: true, force: true });
                 }
@@ -66,7 +66,7 @@ function cleanup() {
 parentPort.on('message', (msg) => {
     if (!msg || !msg.type) return;
 
-    // Если получили обновленную конфигурацию камер, сохраняем ее для последующих запусков очистки
+    // If updated camera config is received, keep it for upcoming cleanup runs
     if (msg.type === 'updateConfig') {
         if (Array.isArray(msg.cameras)) {
             cameras = msg.cameras;
@@ -74,7 +74,7 @@ parentPort.on('message', (msg) => {
         return;
     }
     
-    // Если получили команду на запуск очистки, выполняем ее 
+    // If a cleanup command is received, run cleanup
     if (msg.type !== 'run') return;
 
     try {
